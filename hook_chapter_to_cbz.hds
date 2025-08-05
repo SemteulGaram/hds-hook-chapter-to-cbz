@@ -11,9 +11,9 @@ from pathlib import Path
 from datetime import datetime
 
 # 설정 변수들
-DELETE_ORIGIN = True  # 원본 폴더 삭제 여부 (True: 삭제, False: 보존)
-COPY_TO_PATH = ""     # CBZ 파일을 복사할 경로 (빈 문자열이면 복사하지 않음)
-                      # 예: "D:\\Comics" -> D:\Comics\[제목]\[챕터].cbz 형태로 복사
+DELETE_ORIGIN = False  # 원본 폴더 삭제 여부 (True: 삭제, False: 보존)
+COPY_TO_PATH = ""      # CBZ 파일을 복사할 경로 (빈 문자열이면 복사하지 않음)
+                       # 예: "D:\\Comics" -> D:\Comics\[제목]\[챕터].cbz 형태로 복사
 
 
 def write_log(message):
