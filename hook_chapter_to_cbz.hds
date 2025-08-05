@@ -1,0 +1,264 @@
+#coding: utf8
+#title: Chapter CBZ Converter
+#author: kyush
+
+from utils import Hook
+import os
+import zipfile
+import shutil
+import hashlib
+from pathlib import Path
+from datetime import datetime
+
+# 설정 변수들
+DELETE_ORIGIN = True  # 원본 폴더 삭제 여부 (True: 삭제, False: 보존)
+COPY_TO_PATH = ""     # CBZ 파일을 복사할 경로 (빈 문자열이면 복사하지 않음)
+                      # 예: "D:\\Comics" -> D:\Comics\[제목]\[챕터].cbz 형태로 복사
+
+
+def write_log(message):
+    """플러그인 로그를 plugin.log 파일에 기록"""
+    try:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_message = f"[{timestamp}] {message}\n"
+        
+        with open("plugin.log", "a", encoding="utf-8") as log_file:
+            log_file.write(log_message)
+    except Exception as e:
+        # 로그 기록 실패 시에만 messageBox 사용
+        messageBox(f"로그 기록 실패: {str(e)}")
+
+
+def get_file_hash(file_path):
+    """파일의 SHA256 해시값을 계산"""
+    hash_sha256 = hashlib.sha256()
+    try:
+        with open(file_path, "rb") as f:
+            for chunk in iter(lambda: f.read(4096), b""):
+                hash_sha256.update(chunk)
+        return hash_sha256.hexdigest()
+    except Exception:
+        return None
+
+
+def copy_cbz_to_destination(cbz_path, title, chapter_name):
+    """CBZ 파일을 지정된 경로에 복사 (내용이 다를 때만)"""
+    if not COPY_TO_PATH:
+        return  # 복사 경로가 설정되지 않음
+    
+    try:
+        # 경로 정리 (파일 시스템에서 사용할 수 없는 문자 제거)
+        def sanitize_filename(name):
+            invalid_chars = '<>:"/\\|?*'
+            for char in invalid_chars:
+                name = name.replace(char, '_')
+            return name.strip()
+        
+        safe_title = sanitize_filename(title)
+        safe_chapter = sanitize_filename(chapter_name)
+        
+        # 상대 경로인 경우 현재 작업 디렉토리(CWD)를 기준으로 절대 경로 생성
+        if os.path.isabs(COPY_TO_PATH):
+            copy_base_path = COPY_TO_PATH
+        else:
+            # 현재 작업 디렉토리를 기준으로 상대 경로 해석
+            copy_base_path = os.path.abspath(COPY_TO_PATH)
+        
+        # 대상 디렉토리 생성
+        dest_dir = os.path.join(copy_base_path, safe_title)
+        os.makedirs(dest_dir, exist_ok=True)
+        
+        # CBZ 파일 복사 (내용 비교 후)
+        dest_cbz = os.path.join(dest_dir, f"{safe_chapter}.cbz")
+        
+        # 대상 파일이 이미 존재하는 경우 해시 비교
+        if os.path.exists(dest_cbz):
+            source_hash = get_file_hash(cbz_path)
+            dest_hash = get_file_hash(dest_cbz)
+            
+            if source_hash and dest_hash and source_hash == dest_hash:
+                write_log(f"파일 내용이 동일하여 복사 건너뜀: {dest_cbz}")
+                return
+            else:
+                write_log(f"파일 내용이 다름, 덮어쓰기: {dest_cbz}")
+        else:
+            write_log(f"새 파일 복사: {dest_cbz}")
+        
+        shutil.copy2(cbz_path, dest_cbz)
+        
+    except Exception as e:
+        write_log(f"CBZ 파일 복사 오류: {str(e)}")
+
+
+def get_image_files(folder_path):
+    """폴더에서 이미지 파일들을 찾아서 정렬된 리스트로 반환"""
+    image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'}
+    image_files = []
+    
+    folder = Path(folder_path)
+    if not folder.exists():
+        return []
+    
+    for file_path in folder.iterdir():
+        if file_path.is_file() and file_path.suffix.lower() in image_extensions:
+            image_files.append(file_path)
+    
+    # 파일명으로 정렬 (자연스러운 정렬)
+    image_files.sort(key=lambda x: x.name.lower())
+    return image_files
+
+
+def create_cbz_from_folder(folder_path, cbz_path):
+    """폴더의 이미지들을 CBZ 파일로 압축 (원본 파일명 보존)"""
+    image_files = get_image_files(folder_path)
+    
+    if not image_files:
+        return False
+    
+    try:
+        with zipfile.ZipFile(cbz_path, 'w', zipfile.ZIP_DEFLATED) as cbz_file:
+            for image_path in image_files:
+                # 원본 파일명 보존
+                cbz_file.write(image_path, image_path.name)
+        return True
+    except Exception as e:
+        write_log(f"CBZ 생성 오류: {str(e)}")
+        return False
+
+
+def update_cbz_with_folder(folder_path, cbz_path):
+    """기존 CBZ 파일에 새로운 폴더의 이미지들을 추가/교체 (원본 파일명 보존)"""
+    image_files = get_image_files(folder_path)
+    
+    if not image_files:
+        return False
+    
+    try:
+        temp_cbz = cbz_path + ".tmp"
+        
+        # 새로 추가할 파일들의 파일명 집합
+        new_filenames = {img.name for img in image_files}
+        
+        # 새 CBZ 파일 생성
+        with zipfile.ZipFile(temp_cbz, 'w', zipfile.ZIP_DEFLATED) as new_cbz:
+            # 1. 기존 CBZ에서 중복되지 않는 파일들만 정렬된 순서로 복사
+            if os.path.exists(cbz_path):
+                with zipfile.ZipFile(cbz_path, 'r') as existing_cbz:
+                    # 기존 파일들을 파일명 순으로 정렬
+                    existing_items = [item for item in existing_cbz.infolist() 
+                                    if not item.is_dir() and item.filename not in new_filenames]
+                    existing_items.sort(key=lambda x: x.filename.lower())
+                    
+                    for item in existing_items:
+                        # 스트리밍 방식으로 복사 (메모리 효율적)
+                        with existing_cbz.open(item) as source:
+                            new_cbz.writestr(item.filename, source.read())
+            
+            # 2. 새 이미지들을 정렬된 순서로 추가 (image_files는 이미 정렬됨)
+            for image_path in image_files:
+                new_cbz.write(image_path, image_path.name)
+                write_log(f"이미지 처리됨: {image_path.name}")
+        
+        # 임시 파일을 원본으로 이동
+        if os.path.exists(cbz_path):
+            os.remove(cbz_path)
+        os.rename(temp_cbz, cbz_path)
+        
+        return True
+        
+    except Exception as e:
+        write_log(f"CBZ 업데이트 오류: {str(e)}")
+        if os.path.exists(temp_cbz):
+            os.remove(temp_cbz)
+        return False
+
+
+def process_chapter_folders(base_dir, title):
+    """메인 폴더 내의 모든 서브폴더(회차폴더)를 CBZ로 변환"""
+    if not os.path.exists(base_dir):
+        write_log(f"폴더가 존재하지 않습니다: {base_dir}")
+        return
+    
+    processed_count = 0
+    
+    # 서브폴더들을 찾아서 처리
+    for item in os.listdir(base_dir):
+        item_path = os.path.join(base_dir, item)
+        
+        # 디렉토리인 경우만 처리
+        if os.path.isdir(item_path):
+            cbz_filename = item + ".cbz"
+            cbz_path = os.path.join(base_dir, cbz_filename)
+            
+            # CBZ 파일이 이미 있는지 확인
+            if os.path.exists(cbz_path):
+                # 기존 CBZ에 새 내용 추가
+                if update_cbz_with_folder(item_path, cbz_path):
+                    write_log(f"CBZ 업데이트됨: {cbz_filename}")
+                    
+                    # CBZ 파일 복사 (설정되어 있는 경우)
+                    copy_cbz_to_destination(cbz_path, title, item)
+                    
+                    # 원본 폴더 삭제 (설정에 따라)
+                    if DELETE_ORIGIN:
+                        try:
+                            shutil.rmtree(item_path)
+                            processed_count += 1
+                        except Exception as e:
+                            write_log(f"폴더 삭제 실패: {item} - {str(e)}")
+                    else:
+                        processed_count += 1
+                        write_log(f"원본 폴더 보존됨: {item}")
+                else:
+                    write_log(f"CBZ 업데이트 실패: {cbz_filename}")
+            else:
+                # 새 CBZ 파일 생성
+                if create_cbz_from_folder(item_path, cbz_path):
+                    write_log(f"CBZ 생성됨: {cbz_filename}")
+                    
+                    # CBZ 파일 복사 (설정되어 있는 경우)
+                    copy_cbz_to_destination(cbz_path, title, item)
+                    
+                    # 원본 폴더 삭제 (설정에 따라)
+                    if DELETE_ORIGIN:
+                        try:
+                            shutil.rmtree(item_path)
+                            processed_count += 1
+                        except Exception as e:
+                            write_log(f"폴더 삭제 실패: {item} - {str(e)}")
+                    else:
+                        processed_count += 1
+                        write_log(f"원본 폴더 보존됨: {item}")
+                else:
+                    write_log(f"CBZ 생성 실패: {cbz_filename}")
+    
+    write_log(f"처리 완료: {processed_count}개 폴더가 CBZ로 변환되었습니다.")
+
+
+@Hook.task_finished('chapter_to_cbz')
+def hook_manatoki_chapter_to_cbz(cw):
+    """마나토끼 다운로더 완료 후 회차 폴더들을 CBZ로 변환하는 후크"""
+    
+    # downloader 클래스 확인
+    downloader_class = str(type(cw.downloader))
+    if 'extractor.manatoki_downloader.Downloader_manatoki' not in downloader_class:
+        write_log("마나토끼 다운로더가 아닙니다. CBZ 변환을 건너뜁니다.")
+        return
+    
+    # cw.dir 폴더 확인
+    base_dir = cw.dir
+    if not base_dir:
+        write_log("다운로드 폴더 정보가 없습니다.")
+        return
+    
+    # 제목 추출 (폴더명에서 추출)
+    title = os.path.basename(base_dir)
+    
+    write_log(f"마나토끼 CBZ 변환 시작: {base_dir} (제목: {title})")
+    
+    # 회차 폴더들을 CBZ로 변환
+    process_chapter_folders(base_dir, title)
+
+
+# 플러그인 로드 로그
+write_log("hook_manatoki_chapter_to_cbz.hds 플러그인이 로드되었습니다.")

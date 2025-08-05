@@ -1,0 +1,11 @@
+#coding: utf8
+#title: Unhook
+#author: Kurt Bestor
+
+from utils import Hook
+
+
+Hook.task_finished('chapter_to_cbz').unhook()
+
+
+messageBox('UnHooked!')
